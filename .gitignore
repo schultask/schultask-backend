@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+
+# env
+.env
+.env.*
+!.env.example
+
+# build output
+dist/
+*.tsbuildinfo
+
+# logs
+*.log
+npm-debug.log*
+
+# misc
+.DS_Store
+*.pem
+
+# prisma
+prisma/*.db
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# harness / agent-generated
+.claude/
+CLAUDE.local.md

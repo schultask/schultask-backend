@@ -1,0 +1,292 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  users            User[]
+  roles            Role[]
+  courses          Course[]
+  assignments      Assignment[]
+  learningEvents   LearningEvent[]
+  dailyActiveUsers DailyActiveUsers[]
+
+  @@map("organizations")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  orgId        String   @map("org_id")
+  email        String
+  name         String
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  organization       Organization       @relation(fields: [orgId], references: [id])
+  userRoles          UserRole[]
+  createdCourses     Course[]
+  createdAssignments Assignment[]
+  assignmentTargets  AssignmentTarget[]
+  enrollments        Enrollment[]
+  learningEvents     LearningEvent[]
+
+  // Global, not per-org: signup/login look up a user by email alone (one
+  // email = one account, ever), so the constraint has to match that or the
+  // DB permits exactly the duplicate the app logic assumes can't exist.
+  @@unique([email])
+  @@map("users")
+}
+
+// A Role with orgId = null is a shared *system role* template (admin/manager/learner),
+// seeded once and referenced by every org's users — not duplicated per org.
+// A Role with a real orgId is an org-specific custom role.
+model Role {
+  id    String  @id @default(uuid())
+  orgId String? @map("org_id")
+  name  String
+
+  organization    Organization?    @relation(fields: [orgId], references: [id])
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@unique([orgId, name])
+  @@map("roles")
+}
+
+model Permission {
+  id       String @id @default(uuid())
+  resource String
+  action   String
+
+  rolePermissions RolePermission[]
+
+  @@unique([resource, action])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String @map("user_id")
+  roleId String @map("role_id")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+enum CourseStatus {
+  draft
+  published
+}
+
+model Course {
+  id           String       @id @default(uuid())
+  orgId        String       @map("org_id")
+  title        String
+  description  String?
+  status       CourseStatus @default(draft)
+  aiGenerated  Boolean      @default(false) @map("ai_generated")
+  thumbnailKey String?      @map("thumbnail_key")
+  createdBy    String       @map("created_by")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  organization    Organization            @relation(fields: [orgId], references: [id])
+  creator         User                    @relation(fields: [createdBy], references: [id])
+  modules         Module[]
+  assignments     Assignment[]
+  enrollments     Enrollment[]
+  completionStats CourseCompletionStats[]
+
+  @@map("courses")
+}
+
+// No org_id — org scoping for modules/lessons is inherited from the parent
+// Course (see SCOPE_STRATEGY in casl-ability.factory.ts); every mutating
+// route resolves the parent course through accessibleBy() before touching
+// its children, rather than duplicating the org check onto every table.
+model Module {
+  id        String @id @default(uuid())
+  courseId  String @map("course_id")
+  title     String
+  sortOrder Int    @default(0) @map("sort_order")
+
+  course  Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lessons Lesson[]
+
+  @@map("modules")
+}
+
+enum LessonContentType {
+  video
+  text
+  quiz
+  file
+}
+
+model Lesson {
+  id          String            @id @default(uuid())
+  moduleId    String            @map("module_id")
+  title       String
+  contentType LessonContentType @map("content_type")
+  contentUrl  String?           @map("content_url")
+  contentJson Json?             @map("content_json")
+  sortOrder   Int               @default(0) @map("sort_order")
+
+  module Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  @@map("lessons")
+}
+
+// PLAN.md's section-4 sketch has a nullable `team_id` here for group
+// targeting, but no Team model exists anywhere in the plan — a column
+// pointing at a nonexistent table can't carry a real FK, so it's left out
+// entirely rather than added as a dangling nullable field. Add it as an
+// additive migration (nullable teamId + a check constraint) once a Team
+// model actually exists.
+model Assignment {
+  id        String    @id @default(uuid())
+  orgId     String    @map("org_id")
+  courseId  String    @map("course_id")
+  dueDate   DateTime? @map("due_date")
+  createdBy String    @map("created_by")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  organization Organization       @relation(fields: [orgId], references: [id])
+  course       Course             @relation(fields: [courseId], references: [id])
+  creator      User               @relation(fields: [createdBy], references: [id])
+  targets      AssignmentTarget[]
+
+  @@map("assignments")
+}
+
+// No org_id — same pattern as Module/Lesson: scoping comes from resolving
+// the parent Assignment (which does have org_id) through CASL first.
+model AssignmentTarget {
+  assignmentId String @map("assignment_id")
+  userId       String @map("user_id")
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([assignmentId, userId])
+  @@map("assignment_targets")
+}
+
+enum EnrollmentStatus {
+  not_started
+  in_progress
+  completed
+}
+
+// No org_id — a learner reads/updates their own enrollment by ownership
+// (userId === requester), not through a CASL org-scoped permission; a
+// manager views a course's enrollments by resolving the Course (org-scoped)
+// first. See EnrollmentsService.
+model Enrollment {
+  id          String           @id @default(uuid())
+  userId      String           @map("user_id")
+  courseId    String           @map("course_id")
+  status      EnrollmentStatus @default(not_started)
+  progressPct Int              @default(0) @map("progress_pct")
+  startedAt   DateTime?        @map("started_at")
+  completedAt DateTime?        @map("completed_at")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, courseId])
+  @@map("enrollments")
+}
+
+enum LearningEventVerb {
+  course_started
+  lesson_completed
+  quiz_submitted
+  course_completed
+}
+
+// Intentionally shaped like a trimmed xAPI statement (actor implied by
+// user_id, verb, object, result, context) per PLAN.md section 4/6, so it
+// can be transformed into real xAPI statements later (Phase 9) without a
+// schema rewrite. objectType/objectId are plain strings, not FKs — the
+// object varies by verb (a Course for course_started/completed, a Lesson
+// for lesson_completed/quiz_submitted) and this is an append-only event
+// log, not a queryable relation graph. No permission resource: writing is
+// ownership-scoped (orgId/userId always set server-side from the JWT,
+// never from the request body — see EventsController), and reading is
+// Phase 7's analytics path (`analytics: 'none'` already covers that).
+model LearningEvent {
+  id         String            @id @default(uuid())
+  orgId      String            @map("org_id")
+  userId     String            @map("user_id")
+  verb       LearningEventVerb
+  objectType String            @map("object_type")
+  objectId   String            @map("object_id")
+  result     Json?
+  context    Json?
+  createdAt  DateTime          @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@map("learning_events")
+}
+
+// Rollup tables, populated only by RollupService's nightly job (or its
+// manual per-org trigger) — never written to from request handlers, per
+// PLAN.md section 6 ("Analytics endpoints read only from the rollup
+// tables"). `date` is @db.Date (no time component): the job normalizes to
+// a UTC calendar day before every upsert, or the (org_id, date) /
+// (course_id, date) unique constraints silently fail to dedupe re-runs on
+// the same day the same way the pre-fix (org_id, email) constraint did in
+// Phase 3 — see RollupService.
+model DailyActiveUsers {
+  orgId     String   @map("org_id")
+  date      DateTime @db.Date
+  userCount Int      @map("user_count")
+
+  organization Organization @relation(fields: [orgId], references: [id])
+
+  @@id([orgId, date])
+  @@map("daily_active_users")
+}
+
+// One row per (course, date) snapshot of that course's current Enrollment
+// aggregates — NOT a count of learning_events on that day. enrolled_count/
+// completed_count/avg_progress_pct have no learning_events equivalent (no
+// percentage-at-a-point-in-time event exists), so this table is a nightly
+// snapshot of live Enrollment state, while DailyActiveUsers is the table
+// actually derived from learning_events. See RollupService.
+model CourseCompletionStats {
+  courseId       String   @map("course_id")
+  date           DateTime @db.Date
+  enrolledCount  Int      @map("enrolled_count")
+  completedCount Int      @map("completed_count")
+  avgProgressPct Float    @map("avg_progress_pct")
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@id([courseId, date])
+  @@map("course_completion_stats")
+}
