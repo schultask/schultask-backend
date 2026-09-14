@@ -6,6 +6,19 @@ import { CoursesService } from '../courses/courses.service';
 import { AppAbility } from '../casl/casl-ability.factory';
 import { CreateAssignmentDto } from './dto/create-assignment.dto';
 import { UpdateProgressDto } from './dto/update-progress.dto';
+import { SubmitQuizDto } from './dto/submit-quiz.dto';
+
+type QuizOption = { id: string; text: string };
+type QuizQuestion = { id: string; prompt: string; options: QuizOption[]; correctOptionId: string };
+type QuizContent = { questions: QuizQuestion[] };
+
+function isQuizContent(value: unknown): value is QuizContent {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    Array.isArray((value as { questions?: unknown }).questions)
+  );
+}
 
 @Injectable()
 export class AssignmentsService {
@@ -111,7 +124,67 @@ export class AssignmentsService {
       },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found');
-    return enrollment;
+
+    // The answer key (correctOptionId) must never reach the learner's browser
+    // before they submit — this is the one path a plain <img src>-style network
+    // inspection could otherwise read it from. GET /courses/:id (admin) is
+    // untouched; admins need to see and edit correct answers.
+    return {
+      ...enrollment,
+      course: {
+        ...enrollment.course,
+        modules: enrollment.course.modules.map((module) => ({
+          ...module,
+          lessons: module.lessons.map((lesson) => {
+            if (lesson.contentType !== 'quiz' || !isQuizContent(lesson.contentJson)) return lesson;
+            return {
+              ...lesson,
+              contentJson: {
+                questions: lesson.contentJson.questions.map((q) => ({
+                  id: q.id,
+                  prompt: q.prompt,
+                  options: q.options,
+                })),
+              },
+            };
+          }),
+        })),
+      },
+    };
+  }
+
+  async submitQuiz(userId: string, orgId: string, enrollmentId: string, lessonId: string, dto: SubmitQuizDto) {
+    const enrollment = await this.prisma.enrollment.findFirst({
+      where: { id: enrollmentId, userId },
+    });
+    if (!enrollment) throw new NotFoundException('Enrollment not found');
+
+    const lesson = await this.prisma.lesson.findFirst({
+      where: { id: lessonId, module: { courseId: enrollment.courseId } },
+    });
+    if (!lesson) throw new NotFoundException('Lesson not found');
+    if (lesson.contentType !== 'quiz') throw new BadRequestException('This lesson is not a quiz');
+    if (!isQuizContent(lesson.contentJson) || lesson.contentJson.questions.length === 0) {
+      throw new BadRequestException('This quiz has no questions');
+    }
+
+    const questions = lesson.contentJson.questions;
+    const correctCount = questions.filter((q) => dto.answers[q.id] === q.correctOptionId).length;
+    const totalCount = questions.length;
+    const scorePct = Math.round((correctCount / totalCount) * 100);
+
+    await this.prisma.learningEvent.create({
+      data: {
+        orgId,
+        userId,
+        verb: 'quiz_submitted',
+        objectType: 'lesson',
+        objectId: lessonId,
+        result: { scorePct, correctCount, totalCount },
+      },
+    });
+
+    return { scorePct, correctCount, totalCount };
   }
 
   async updateMyProgress(userId: string, enrollmentId: string, dto: UpdateProgressDto) {

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AbilityGuard } from '../casl/ability.guard';
 import { CheckAbility } from '../casl/check-ability.decorator';
@@ -6,6 +6,7 @@ import { AppAbility } from '../casl/casl-ability.factory';
 import { CurrentUser, CurrentUserPayload } from '../auth/current-user.decorator';
 import { AssignmentsService } from './assignments.service';
 import { UpdateProgressDto } from './dto/update-progress.dto';
+import { SubmitQuizDto } from './dto/submit-quiz.dto';
 
 type AbilityRequest = { ability: AppAbility };
 
@@ -38,6 +39,18 @@ export class EnrollmentsController {
   @Get('enrollments/:id/course')
   getCourse(@CurrentUser() user: CurrentUserPayload, @Param('id') id: string) {
     return this.assignments.findEnrollmentCourse(user.id, id);
+  }
+
+  // Scoring stays server-side (see AssignmentsService.submitQuiz) so the answer
+  // key is never present in a response the learner's browser can inspect.
+  @Post('enrollments/:id/lessons/:lessonId/quiz-submit')
+  submitQuiz(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id') id: string,
+    @Param('lessonId') lessonId: string,
+    @Body() dto: SubmitQuizDto,
+  ) {
+    return this.assignments.submitQuiz(user.id, user.orgId, id, lessonId, dto);
   }
 
   // Manager/admin view of a course's enrollments — scoped by resolving the
