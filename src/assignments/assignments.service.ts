@@ -3,6 +3,7 @@ import { accessibleBy } from '@casl/prisma';
 import { EnrollmentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CoursesService } from '../courses/courses.service';
+import { StorageService } from '../storage/storage.service';
 import { AppAbility } from '../casl/casl-ability.factory';
 import { CreateAssignmentDto } from './dto/create-assignment.dto';
 import { UpdateProgressDto } from './dto/update-progress.dto';
@@ -25,6 +26,7 @@ export class AssignmentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly courses: CoursesService,
+    private readonly storage: StorageService,
   ) {}
 
   // Two ids cross an org boundary here — the course and every target user —
@@ -151,6 +153,30 @@ export class AssignmentsService {
         })),
       },
     };
+  }
+
+  // The player's media source for an uploaded image/video lesson —
+  // deliberately not CoursesService.getLessonContentStream (gated on
+  // course:read), for the same reason findEnrollmentCourse above isn't
+  // CoursesService.findOne: a learner has org-wide course:read, so a
+  // module-scoped route would let them stream a draft course's content
+  // they were never assigned. Resolving through the enrollment closes that
+  // on the one path the player actually calls.
+  async getLessonContentForEnrollment(userId: string, enrollmentId: string, lessonId: string) {
+    const enrollment = await this.prisma.enrollment.findFirst({ where: { id: enrollmentId, userId } });
+    if (!enrollment) throw new NotFoundException('Enrollment not found');
+
+    const lesson = await this.prisma.lesson.findFirst({
+      where: { id: lessonId, module: { courseId: enrollment.courseId } },
+    });
+    if (!lesson) throw new NotFoundException('Lesson not found');
+    if (!lesson.contentKey) throw new NotFoundException('Lesson has no uploaded content');
+
+    const [stream, contentType] = await Promise.all([
+      this.storage.getObjectStream(lesson.contentKey),
+      this.storage.getContentType(lesson.contentKey),
+    ]);
+    return { stream, contentType };
   }
 
   async submitQuiz(userId: string, orgId: string, enrollmentId: string, lessonId: string, dto: SubmitQuizDto) {

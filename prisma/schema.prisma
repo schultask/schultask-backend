@@ -142,6 +142,7 @@ enum LessonContentType {
   text
   quiz
   file
+  image
 }
 
 model Lesson {
@@ -150,6 +151,13 @@ model Lesson {
   title       String
   contentType LessonContentType @map("content_type")
   contentUrl  String?           @map("content_url")
+  // MinIO object key for an uploaded image/video (same pattern as
+  // Course.thumbnailKey). Null when the lesson has no uploaded content —
+  // video/file lessons can still fall back to contentUrl as an external
+  // link. Cleared (and the object deleted) whenever contentType changes,
+  // since an old key would otherwise point at orphaned content of the
+  // wrong kind.
+  contentKey  String?           @map("content_key")
   contentJson Json?             @map("content_json")
   sortOrder   Int               @default(0) @map("sort_order")
 

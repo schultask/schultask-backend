@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AbilityGuard } from '../casl/ability.guard';
 import { CheckAbility } from '../casl/check-ability.decorator';
@@ -39,6 +40,21 @@ export class EnrollmentsController {
   @Get('enrollments/:id/course')
   getCourse(@CurrentUser() user: CurrentUserPayload, @Param('id') id: string) {
     return this.assignments.findEnrollmentCourse(user.id, id);
+  }
+
+  // Media for an image/video lesson — see
+  // AssignmentsService.getLessonContentForEnrollment for why this is a
+  // separate route from the admin builder's module-scoped one.
+  @Get('enrollments/:id/lessons/:lessonId/content')
+  async getLessonContent(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id') id: string,
+    @Param('lessonId') lessonId: string,
+    @Res() res: Response,
+  ) {
+    const { stream, contentType } = await this.assignments.getLessonContentForEnrollment(user.id, id, lessonId);
+    res.type(contentType);
+    stream.pipe(res);
   }
 
   // Scoring stays server-side (see AssignmentsService.submitQuiz) so the answer

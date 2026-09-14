@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { accessibleBy } from '@casl/prisma';
 import { CourseStatus, Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -123,7 +123,10 @@ export class CoursesService {
 
   // --- Lessons (scoped by resolving module -> course -> ability) ---
 
-  private async findModuleOrThrow(ability: AppAbility, moduleId: string, action: CourseAction) {
+  // Public: LessonsController's GET content route resolves through this
+  // directly (moduleId is on the URL, unlike the learner's enrollment-scoped
+  // equivalent in AssignmentsService, which never sees a moduleId).
+  async findModuleOrThrow(ability: AppAbility, moduleId: string, action: CourseAction) {
     const module = await this.prisma.module.findFirst({
       where: { id: moduleId, course: accessibleBy(ability, action).Course },
     });
@@ -149,10 +152,22 @@ export class CoursesService {
     await this.findModuleOrThrow(ability, moduleId, 'update');
     const lesson = await this.prisma.lesson.findFirst({ where: { id: lessonId, moduleId } });
     if (!lesson) throw new NotFoundException('Lesson not found');
-    return this.prisma.lesson.update({
+
+    // An old uploaded object left behind under a changed contentType would
+    // never be reachable again (the player only ever reads contentKey for
+    // the lesson's *current* type) — clear it here, same as setThumbnail
+    // replacing a course's old thumbnail, rather than leaking it in MinIO.
+    const changingContentType = dto.contentType !== undefined && dto.contentType !== lesson.contentType;
+    const updated = await this.prisma.lesson.update({
       where: { id: lessonId },
-      data: { ...dto, contentJson: dto.contentJson as Prisma.InputJsonValue },
+      data: {
+        ...dto,
+        contentJson: dto.contentJson as Prisma.InputJsonValue,
+        ...(changingContentType ? { contentKey: null } : {}),
+      },
     });
+    if (changingContentType && lesson.contentKey) await this.storage.deleteObject(lesson.contentKey);
+    return updated;
   }
 
   async removeLesson(ability: AppAbility, moduleId: string, lessonId: string) {
@@ -160,5 +175,54 @@ export class CoursesService {
     const lesson = await this.prisma.lesson.findFirst({ where: { id: lessonId, moduleId } });
     if (!lesson) throw new NotFoundException('Lesson not found');
     await this.prisma.lesson.delete({ where: { id: lessonId } });
+    if (lesson.contentKey) await this.storage.deleteObject(lesson.contentKey);
+  }
+
+  // Uploaded lesson media (image/video), same pattern as setThumbnail: only
+  // image/video lessons accept it (quiz/text/file content lives elsewhere —
+  // file stays a plain external link, out of this phase's scope). The old
+  // object is deleted only after the DB row points at the new key.
+  async setLessonContent(
+    ability: AppAbility,
+    moduleId: string,
+    lessonId: string,
+    file: Express.Multer.File,
+  ) {
+    await this.findModuleOrThrow(ability, moduleId, 'update');
+    const lesson = await this.prisma.lesson.findFirst({ where: { id: lessonId, moduleId } });
+    if (!lesson) throw new NotFoundException('Lesson not found');
+    if (lesson.contentType !== 'image' && lesson.contentType !== 'video') {
+      throw new BadRequestException('Only image and video lessons accept uploaded content');
+    }
+    const expectedPrefix = lesson.contentType === 'image' ? 'image/' : 'video/';
+    if (!file.mimetype.startsWith(expectedPrefix)) {
+      throw new BadRequestException(`Expected a ${lesson.contentType} file`);
+    }
+
+    const oldKey = lesson.contentKey;
+    const key = `lessons/${lessonId}/${randomUUID()}-${file.originalname}`;
+    await this.storage.putObject(key, file.buffer, file.mimetype);
+    const updated = await this.prisma.lesson.update({ where: { id: lessonId }, data: { contentKey: key } });
+    if (oldKey) await this.storage.deleteObject(oldKey);
+    return updated;
+  }
+
+  // Admin/manager builder-preview path only — gated on the same `read`
+  // ability as everything else in this service. The learner-facing path is
+  // deliberately separate (AssignmentsService.getLessonContentForEnrollment,
+  // resolved through enrollment ownership) so this module-scoped route,
+  // reachable with org-wide course:read, never becomes the way a learner
+  // reads a draft course's content — see the Phase 4/6 draft-visibility
+  // notes in PROGRESS.md for why that distinction matters here.
+  async getLessonContentStream(ability: AppAbility, moduleId: string, lessonId: string) {
+    await this.findModuleOrThrow(ability, moduleId, 'read');
+    const lesson = await this.prisma.lesson.findFirst({ where: { id: lessonId, moduleId } });
+    if (!lesson) throw new NotFoundException('Lesson not found');
+    if (!lesson.contentKey) throw new NotFoundException('Lesson has no uploaded content');
+    const [stream, contentType] = await Promise.all([
+      this.storage.getObjectStream(lesson.contentKey),
+      this.storage.getContentType(lesson.contentKey),
+    ]);
+    return { stream, contentType };
   }
 }
